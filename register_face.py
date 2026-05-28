@@ -1,8 +1,16 @@
 from fastapi import APIRouter, UploadFile, File, Form
+from deepface import DeepFace
 from database import cursor, connection
-import shutil
+import aiofiles
+import os
+import json
+import traceback
 
 router = APIRouter()
+
+IMAGE_DIR = "images/students"
+
+os.makedirs(IMAGE_DIR, exist_ok=True)
 
 
 @router.post("/register-student")
@@ -15,21 +23,65 @@ async def register_student(
     image: UploadFile = File(...)
 ):
 
-    image_path = f"images/students/{roll_number}.jpg"
+    try:
 
-    with open(image_path, "wb") as buffer:
+        image_path = f"{IMAGE_DIR}/{roll_number}.jpg"
 
-        shutil.copyfileobj(image.file, buffer)
+        # Prevent duplicate roll numbers
+        cursor.execute(
+            "SELECT 1 FROM students WHERE roll_number = ?",
+            (roll_number,)
+        )
 
-    cursor.execute(
+        if cursor.fetchone():
 
-        "INSERT INTO students (name, roll_number, image_path) VALUES (?, ?, ?)",
+            return {
+                "message": "Roll number already exists"
+            }
 
-        (name, roll_number, image_path)
-    )
+        # Async image save
+        async with aiofiles.open(image_path, "wb") as buffer:
 
-    connection.commit()
+            await buffer.write(await image.read())
 
-    return {
-        "message": "Student Registered Successfully"
-    }
+        print("Image Saved")
+
+        # Generate embedding ONCE during registration
+        embedding = DeepFace.represent(
+            img_path=image_path,
+            model_name="Facenet",
+            enforce_detection=False
+        )[0]["embedding"]
+
+        print("Embedding Generated")
+
+        # Store embedding as JSON string
+        embedding_json = json.dumps(embedding)
+
+        cursor.execute(
+            """
+            INSERT INTO students
+            (name, roll_number, image_path, embedding)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                name,
+                roll_number,
+                image_path,
+                embedding_json
+            )
+        )
+
+        connection.commit()
+
+        return {
+            "message": "Student Registered Successfully"
+        }
+
+    except Exception as e:
+
+        print(traceback.format_exc())
+
+        return {
+            "error": str(e)
+        }

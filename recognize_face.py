@@ -1,8 +1,9 @@
 from fastapi import APIRouter, UploadFile, File
 from deepface import DeepFace
 from database import cursor
-import shutil
+import aiofiles
 import os
+import uuid
 
 router = APIRouter()
 
@@ -12,46 +13,65 @@ async def recognize_face(
     image: UploadFile = File(...)
 ):
 
-    temp_path = "temp.jpg"
+    temp_path = f"{uuid.uuid4()}.jpg"
 
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(image.file, buffer)
+    try:
 
-    cursor.execute("SELECT * FROM students")
+        # Async file save
+        async with aiofiles.open(temp_path, "wb") as f:
+            await f.write(await image.read())
 
-    students = cursor.fetchall()
+        # Generate uploaded face embedding ONCE
+        uploaded_embedding = DeepFace.represent(
+            img_path=temp_path,
+            model_name="Facenet",
+            enforce_detection=False
+        )[0]["embedding"]
 
-    for student in students:
+        # Fetch only required columns
+        cursor.execute("""
+            SELECT id, name, roll_number, image_path
+            FROM students
+        """)
 
-        student_id = student[0]
-        name = student[1]
-        roll_number = student[2]
-        image_path = student[3]
+        students = cursor.fetchall()
 
-        try:
+        for student_id, name, roll_number, image_path in students:
 
-            result = DeepFace.verify(
-                img1_path=temp_path,
-                img2_path=image_path,
-                enforce_detection=False
-            )
+            try:
 
-            if result["verified"]:
+                # Generate student embedding
+                student_embedding = DeepFace.represent(
+                    img_path=image_path,
+                    model_name="Facenet",
+                    enforce_detection=False
+                )[0]["embedding"]
 
-                os.remove(temp_path)
+                # Compare embeddings
+                result = DeepFace.verify(
+                    img1_path=uploaded_embedding,
+                    img2_path=student_embedding,
+                    model_name="Facenet",
+                    enforce_detection=False
+                )
 
-                return {
-                    "matched": True,
-                    "student_id": student_id,
-                    "name": name,
-                    "roll_number": roll_number
-                }
+                if result.get("verified"):
 
-        except:
-            pass
+                    return {
+                        "matched": True,
+                        "student_id": student_id,
+                        "name": name,
+                        "roll_number": roll_number
+                    }
 
-    os.remove(temp_path)
+            except Exception:
+                continue
 
-    return {
-        "matched": False
-    }
+        return {
+            "matched": False
+        }
+
+    finally:
+
+        if os.path.exists(temp_path):
+            os.remove(temp_path)

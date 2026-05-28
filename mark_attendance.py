@@ -1,93 +1,109 @@
 from fastapi import APIRouter, UploadFile, File, Form
 from deepface import DeepFace
 from database import cursor, connection
-import shutil
-import os
 from datetime import datetime
+import aiofiles
+import os
 
 router = APIRouter()
+
+TEMP_PATH = "temp.jpg"
 
 
 @router.post("/mark-attendance")
 async def mark_attendance(
-
     subject_code: str = Form(...),
-
     image: UploadFile = File(...)
 ):
 
-    temp_path = "temp.jpg"
+    try:
 
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(image.file, buffer)
+        # Save image
+        async with aiofiles.open(TEMP_PATH, "wb") as f:
+            await f.write(await image.read())
 
-    cursor.execute("SELECT * FROM students")
+        # Generate uploaded image embedding ONCE
+        uploaded_embedding = DeepFace.represent(
+            img_path=TEMP_PATH,
+            model_name="Facenet",
+            enforce_detection=False
+        )[0]["embedding"]
 
-    students = cursor.fetchall()
+        # Fetch only required fields
+        cursor.execute("""
+            SELECT id, name, roll_number, image_path
+            FROM students
+        """)
 
-    for student in students:
+        students = cursor.fetchall()
 
-        student_id = student[0]
-        name = student[1]
-        roll_number = student[2]
-        image_path = student[3]
+        today_date = datetime.now().strftime("%Y-%m-%d")
 
-        try:
+        for student_id, name, roll_number, image_path in students:
 
-            result = DeepFace.verify(
+            try:
 
-                img1_path=temp_path,
+                # Generate student embedding
+                student_embedding = DeepFace.represent(
+                    img_path=image_path,
+                    model_name="Facenet",
+                    enforce_detection=False
+                )[0]["embedding"]
 
-                img2_path=image_path,
-
-                model_name="Facenet",
-
-                enforce_detection=True
-            )
-
-            print("\n========================")
-            print("Student:", name)
-            print("Roll:", roll_number)
-            print("Verified:", result["verified"])
-            print("Distance:", result["distance"])
-            print("========================\n")
-
-            if result["verified"]:
-
-                today_date = datetime.now().strftime("%Y-%m-%d")
-
-                cursor.execute(
-                    """
-                    INSERT INTO attendance
-                    (student_id, subject_code, date)
-                    VALUES (?, ?, ?)
-                    """,
-                    (student_id, subject_code, today_date)
+                # Compare embeddings
+                result = DeepFace.verify(
+                    img1_path=uploaded_embedding,
+                    img2_path=student_embedding,
+                    model_name="Facenet",
+                    enforce_detection=False
                 )
 
-                connection.commit()
+                if result["verified"]:
 
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                    # Check duplicate attendance
+                    cursor.execute("""
+                        SELECT 1
+                        FROM attendance
+                        WHERE student_id = ?
+                        AND subject_code = ?
+                        AND date = ?
+                    """, (
+                        student_id,
+                        subject_code,
+                        today_date
+                    ))
 
-                return {
-                    "attendance_marked": True,
-                    "student_name": name,
-                    "roll_number": roll_number,
-                    "subject_code": subject_code,
-                    "date": today_date
-                }
+                    if not cursor.fetchone():
 
-        except Exception as e:
+                        cursor.execute("""
+                            INSERT INTO attendance
+                            (student_id, subject_code, date)
+                            VALUES (?, ?, ?)
+                        """, (
+                            student_id,
+                            subject_code,
+                            today_date
+                        ))
 
-            print(
-                f"Face verification failed for {name}: {e}"
-            )
+                        connection.commit()
 
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
+                    return {
+                        "attendance_marked": True,
+                        "student_name": name,
+                        "roll_number": roll_number,
+                        "subject_code": subject_code,
+                        "date": today_date
+                    }
 
-    return {
-        "attendance_marked": False,
-        "message": "Face not recognized"
-    }
+            except Exception:
+                continue
+
+        return {
+            "attendance_marked": False,
+            "message": "Face not recognized"
+        }
+
+    finally:
+
+        if os.path.exists(TEMP_PATH):
+            os.remove(TEMP_PATH)

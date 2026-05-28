@@ -7,57 +7,46 @@ router = APIRouter()
 @router.get("/attendance-history/{roll_number}")
 def attendance_history(roll_number: str):
 
-    cursor.execute(
-        """
-        SELECT id, name, image_path
-        FROM students
-        WHERE roll_number = ?
-        """,
-        (roll_number,)
-    )
+    cursor.execute("""
+        SELECT
+            s.name,
+            s.roll_number,
+            s.image_path,
+            a.subject_code,
+            a.date
+        FROM students s
+        LEFT JOIN attendance a
+        ON s.id = a.student_id
+        WHERE s.roll_number = ?
+        ORDER BY a.date DESC
+    """, (roll_number,))
 
-    student = cursor.fetchone()
+    records = cursor.fetchall()
 
-    if not student:
+    if not records:
 
         return {
             "message": "Student not found"
         }
 
-    student_id = student[0]
-    student_name = student[1]
-    image_path = student[2]
+    first = records[0]
 
-    cursor.execute(
-        """
-        SELECT subject_code, date
-        FROM attendance
-        WHERE student_id = ?
-        ORDER BY date DESC
-        """,
-        (student_id,)
-    )
-
-    records = cursor.fetchall()
-
-    attendance_data = []
-
-    for record in records:
-
-        attendance_data.append({
-
-            "subject_code": record[0],
-
-            "date": record[1]
-        })
+    attendance_data = [
+        {
+            "subject_code": subject_code,
+            "date": date
+        }
+        for _, _, _, subject_code, date in records
+        if subject_code
+    ]
 
     return {
 
-        "name": student_name,
+        "name": first[0],
 
-        "roll_number": roll_number,
+        "roll_number": first[1],
 
-        "image_path": image_path,
+        "image_path": first[2],
 
         "total_present": len(attendance_data),
 
